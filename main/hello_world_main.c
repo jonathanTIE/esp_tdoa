@@ -18,6 +18,7 @@
 #include "esp_timer.h"
 #include <sys/time.h>
 
+#define UART_USB_BAUD_RATE 115200
 #define BUFF_ADC_LEN 256
 #define GPIO_OUTPUT GPIO_NUM_4
 
@@ -87,13 +88,19 @@ static void gpio_emittor_init() {
 
 static void uart_init() {
     uart_config_t uart_config = {
-        .baud_rate = ECHO_UART_BAUD_RATE,
+        .baud_rate = UART_USB_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
+
+    int intr_alloc_flags = 0;
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, BUFF_ADC_LEN, BUFF_ADC_LEN, 0, NULL, intr_alloc_flags));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
 }
 void app_main(void)
 {
@@ -101,7 +108,7 @@ void app_main(void)
     gpio_emittor_init();
 
     //INIT UART
-
+    uart_init();
 
     // INIT ADC
     adc_continuous_handle_t handle = NULL;
@@ -122,6 +129,10 @@ void app_main(void)
     uint32_t ret_num = 0;
     memset(result, 0xcc, BUFF_ADC_LEN);
 
+    // data : 2 bytes per sample + 1 byte for newline
+    uint8_t *data = (uint8_t *) malloc(BUFF_ADC_LEN * sizeof(uint16_t) + BUFF_ADC_LEN * sizeof(uint8_t)); 
+    const char newline = '\n';
+
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         while (1) {
@@ -134,22 +145,25 @@ void app_main(void)
                 ESP_LOGI(TAG, "Triggered emittor");
             }
             ret = adc_continuous_read(handle, result, BUFF_ADC_LEN, &ret_num, 0);
-                if (ret == ESP_OK) {
-                    for (int i = 0; i < ret_num; i += SOC_ADC_DIGI_RESULT_BYTES) {
-                        adc_digi_output_data_t *p = (adc_digi_output_data_t*)&result[i];
-                        uint16_t adc_data = (p)->type1.data;
-                        if(adc_data > 20) {
-                            ESP_LOGI(TAG, " %"PRIx16, adc_data);
-                        }
+            if (ret == ESP_OK) {
+                //Reset data buffer
+                memset(data, 0, BUFF_ADC_LEN * sizeof(uint16_t) + BUFF_ADC_LEN * sizeof(uint8_t));  
+                for (int i = 0; i < ret_num; i += SOC_ADC_DIGI_RESULT_BYTES) {
+                    adc_digi_output_data_t *p = (adc_digi_output_data_t*)&result[i];
+                    uint16_t adc_data = (p)->type1.data;
 
+                    // Copy the bytes of uint16_t into the buffer
+                    for (int j = 0; j < sizeof(uint8_t); ++j) {
+                        data[i + i / 2 + j] = 
+                                (adc_data >> (8 * j)) & 0xFF;
                     }
-                    /**
-                     * Because printing is slow, so every time you call `ulTaskNotifyTake`, it will immediately return.
-                     * To avoid a task watchdog timeout, add a delay here. When you replace the way you process the data,
-                     * usually you don't need this delay (as this task will block for a while).
-                     */
-                    vTaskDelay(1 / portTICK_PERIOD_MS);
-                } 
+                    //Add separator between each sample
+                    data[i + i/2 + sizeof(uint16_t)] = newline;
+                }
+                uart_write_bytes(UART_NUM_0, &data, sizeof(data));
+
+                vTaskDelay(1 / portTICK_PERIOD_MS);
+            } 
         }
     }
 }
